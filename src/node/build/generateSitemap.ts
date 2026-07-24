@@ -26,7 +26,7 @@ export async function generateSitemap(siteConfig: SiteConfig) {
 
     if (!fs.existsSync(file)) return undefined
 
-    const { data } = matter.read(file)
+    const { data } = matter.read(file, {})
     if (data.lastUpdated === false) return undefined
     if (data.lastUpdated instanceof Date) return +data.lastUpdated
 

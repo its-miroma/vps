@@ -48,7 +48,7 @@ export function processIncludes(
         // region not found, it might be a header
         const headerContent =
           path.extname(includePath) === '.md'
-            ? matter(content).content
+            ? matter(content, {}).content
             : content
         const headerLines = headerContent.split(/\r?\n/)
         const tokens = md
@@ -90,7 +90,7 @@ export function processIncludes(
     }
 
     if (!hasMeta && path.extname(includePath) === '.md') {
-      content = matter(content).content
+      content = matter(content, {}).content
     }
 
     includes.push(slash(includePath))
