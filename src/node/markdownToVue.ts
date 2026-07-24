@@ -1,5 +1,6 @@
 import { resolveTitleFromToken } from '@mdit-vue/shared'
 import { LRUCache } from 'lru-cache'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createDebug } from 'obug'
@@ -24,7 +25,13 @@ import { getGitTimestamp } from './utils/getGitTimestamp'
 import { processIncludes } from './utils/processIncludes'
 
 const debug = createDebug('vitepress:md')
-const cache = new LRUCache<string, MarkdownCompileResult>({ max: 1024 })
+const cache = new LRUCache<string, MarkdownCompileResult>({
+  max: 1024,
+  maxSize: 64 * 1024 * 1024,
+  sizeCalculation(value, key) {
+    return Math.max(1, 2 * (key.length + value.vueSrc.length))
+  }
+})
 
 export interface MarkdownCompileResult {
   vueSrc: string
@@ -115,7 +122,9 @@ export async function createMarkdownToVueRenderFn(
     file = rewrites.get(normalizeDriveLetter(file)) || file
     const relativePath = slash(path.relative(srcDir, file))
 
-    const cacheKey = JSON.stringify({ src, ts, relativePath })
+    const srcHash = createHash('sha256').update(src).digest('base64url')
+    // TODO: avoid JSON.stringify
+    const cacheKey = JSON.stringify({ srcHash, ts, relativePath })
     if (options.cache !== false) {
       const cached = cache.get(cacheKey)
       if (cached) {
