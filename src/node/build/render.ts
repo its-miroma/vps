@@ -13,26 +13,111 @@ import {
   notFoundPageData,
   resolveSiteDataByRoute,
   sanitizeFileName,
-  slash,
   type HeadConfig,
   type PageData,
   type SSGContext
 } from '../shared'
 import { nativeImport } from '../utils/nativeImport'
 
+export interface PageChunkInfo {
+  fileName: string
+  code: string
+}
+
+export interface RenderMetadata {
+  appChunk?: { fileName: string; imports: string[] }
+  cssChunk?: { fileName: string }
+  assets: string[]
+  isDefaultTheme: boolean
+  pageChunks: Map<string, string[] | PageChunkInfo>
+}
+
+export function createRenderMetadata(
+  config: SiteConfig,
+  clientResult: Rolldown.RolldownOutput | null | undefined,
+  serverResult: Rolldown.RolldownOutput | null | undefined
+): RenderMetadata {
+  const clientOutput = clientResult?.output ?? []
+  const assetOutput = (config.mpa ? serverResult : clientResult)?.output ?? []
+
+  const appChunk = clientOutput.find(
+    (chunk): chunk is Rolldown.OutputChunk =>
+      chunk.type === 'chunk' &&
+      chunk.isEntry &&
+      !!chunk.facadeModuleId?.endsWith('.js')
+    // TODO: chunk.facadeModuleId === slash(path.join(config.srcDir, page))
+  )
+
+  const cssChunk = assetOutput.find(
+    (chunk): chunk is Rolldown.OutputAsset =>
+      chunk.type === 'asset' && chunk.fileName.endsWith('.css')
+  )
+
+  const assets = assetOutput
+    .filter(
+      (chunk): chunk is Rolldown.OutputAsset =>
+        chunk.type === 'asset' && !chunk.fileName.endsWith('.css')
+    )
+    .map((asset) => config.site.base + asset.fileName)
+
+  const isDefaultTheme = clientOutput.some(
+    (chunk): chunk is Rolldown.OutputChunk =>
+      chunk.type === 'chunk' &&
+      // @ts-ignore
+      (vite?.rolldownVersion || chunk.name === 'theme') &&
+      chunk.moduleIds.some((id) => id.includes('client/theme-default'))
+  )
+
+  const pageChunks = new Map<string, string[] | PageChunkInfo>()
+  for (const chunk of clientOutput) {
+    if (chunk.type !== 'chunk' || !chunk.facadeModuleId) continue
+    const facadeModuleId = normalizePath(chunk.facadeModuleId)
+    pageChunks.set(
+      facadeModuleId,
+      config.mpa
+        ? { fileName: chunk.fileName, code: chunk.code }
+        : [...chunk.imports]
+    )
+  }
+
+  return {
+    appChunk: appChunk
+      ? // @ts-expect-error
+        { fileName: appChunk.fileName, imports: [...appChunk.imports] }
+      : undefined,
+    cssChunk: cssChunk ? { fileName: cssChunk.fileName } : undefined,
+    assets,
+    isDefaultTheme,
+    pageChunks
+  }
+}
+
+export function serializeRenderMetadata(renderMetadata: RenderMetadata) {
+  return {
+    ...renderMetadata,
+    pageChunks: [...renderMetadata.pageChunks]
+  }
+}
+
+export function deserializeRenderMetadata(renderMetadata: any): RenderMetadata {
+  return {
+    ...renderMetadata,
+    pageChunks: new Map(renderMetadata.pageChunks)
+  }
+}
+
 export async function renderPage(
   render: (path: string) => Promise<SSGContext>,
   config: SiteConfig,
   page: string, // foo.md
-  result: Rolldown.RolldownOutput | null | undefined,
-  appChunk: Rolldown.OutputChunk | null | undefined,
-  cssChunk: Rolldown.OutputAsset | null | undefined,
-  assets: string[],
+  renderMetadata: RenderMetadata,
   pageToHashMap: Record<string, string>,
   metadataScript: { html: string; inHead: boolean },
   additionalHeadTags: HeadConfig[],
-  usedIcons: Set<string>
+  usedIcons: Set<string>,
+  serverTempDir: string = config.tempDir
 ) {
+  const { appChunk, cssChunk, assets, pageChunks } = renderMetadata
   const routePath = `/${page.replace(/\.md$/, '')}`
   const siteData = resolveSiteDataByRoute(config.site, page)
 
@@ -58,7 +143,7 @@ export async function renderPage(
   try {
     // resolve page data so we can render head tags
     const { __pageData } = await nativeImport(
-      path.join(config.tempDir, pageServerJsFileName)
+      path.join(serverTempDir, pageServerJsFileName)
     )
     pageData = __pageData
   } catch (e) {
@@ -79,13 +164,13 @@ export async function renderPage(
   let preloadLinks =
     config.mpa || (!hasCustom404 && page === '404.md')
       ? []
-      : result && appChunk
+      : appChunk
         ? [
             ...new Set([
               // resolve imports for index.js + page.md.js and inject script tags
               // for them as well so we fetch everything as early as possible
               // without having to wait for entry chunks to parse
-              ...resolvePageImports(config, page, result, appChunk),
+              ...resolvePageImports(config, page, pageChunks, appChunk),
               pageClientJsFileName
             ])
           ]
@@ -138,12 +223,11 @@ export async function renderPage(
   )
 
   let inlinedScript = ''
-  if (config.mpa && result) {
-    const matchingChunk = result.output.find(
-      (chunk): chunk is Rolldown.OutputChunk =>
-        chunk.type === 'chunk' &&
-        chunk.facadeModuleId === slash(path.join(config.srcDir, page))
-    )
+  if (config.mpa) {
+    const matchingChunk = pageChunks.get(
+      normalizePath(path.join(config.srcDir, page))
+    ) as PageChunkInfo | undefined
+
     if (matchingChunk) {
       if (!matchingChunk.code.includes('import')) {
         inlinedScript = `<script type="module">${matchingChunk.code}</script>`
@@ -210,8 +294,8 @@ export async function renderPage(
 function resolvePageImports(
   config: SiteConfig,
   page: string,
-  result: Rolldown.RolldownOutput,
-  appChunk: Rolldown.OutputChunk
+  pageChunks: Map<string, string[] | PageChunkInfo>,
+  appChunk: { fileName: string; imports: string[] }
 ) {
   page = config.rewrites.inv[page] || page
   // find the page's js chunk and inject script tags for its imports so that
@@ -226,14 +310,11 @@ function resolvePageImports(
     // fail, which is expected
   }
   srcPath = normalizePath(srcPath)
-  const pageChunk = result.output.find(
-    (chunk): chunk is Rolldown.OutputChunk =>
-      chunk.type === 'chunk' && chunk.facadeModuleId === srcPath
-  )
+  const pageImports = (pageChunks.get(srcPath) as string[]) || []
   return [
     ...appChunk.imports,
     // ...appChunk.dynamicImports,
-    ...(pageChunk?.imports || [])
+    ...pageImports
     // ...pageChunk.dynamicImports
   ]
 }

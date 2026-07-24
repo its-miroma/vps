@@ -38,7 +38,8 @@ const excludedModules = [
 // bundles the VitePress app for both client AND server.
 export async function bundle(
   config: SiteConfig,
-  options: BuildOptions
+  options: BuildOptions,
+  serverBatch?: { pages: string[]; tempDir: string }
 ): Promise<{
   clientResult: Rolldown.RolldownOutput | null
   serverResult: Rolldown.RolldownOutput
@@ -51,13 +52,18 @@ export async function bundle(
   // this is a multi-entry build - every page is considered an entry chunk
   // the loading is done via filename conversion rules so that the
   // metadata doesn't need to be included in the main chunk.
-  const input: Record<string, string> = {}
-  config.pages.forEach((file) => {
-    // page filename conversion
-    // foo/bar.md -> foo_bar.md
-    const alias = config.rewrites.map[file] || file
-    input[slash(alias).replace(/\//g, '_')] = path.resolve(config.srcDir, file)
-  })
+  const createInput = (pages: string[]) =>
+    Object.fromEntries(
+      pages.map((file) => {
+        // page filename conversion
+        // foo/bar.md -> foo_bar.md
+        // TODO: use / -> __ to avoid conflict with foo_bar.md
+        const key = //
+          slash(config.rewrites.map[file] || file).replaceAll('/', '_')
+        const value = path.resolve(config.srcDir, file)
+        return [key, value] as const
+      })
+    )
 
   const themeEntryRE = new RegExp(
     `^${escapeRegExp(
@@ -73,7 +79,9 @@ export async function bundle(
   } = options
 
   const resolveViteConfig = async (
-    ssr: boolean
+    ssr: boolean,
+    pages = config.pages,
+    tempDir = config.tempDir
   ): Promise<ViteInlineConfig> => ({
     root: config.srcDir,
     cacheDir: config.cacheDir,
@@ -83,7 +91,9 @@ export async function bundle(
       config,
       ssr,
       pageToHashMap,
-      clientJSMap
+      clientJSMap,
+      undefined,
+      Boolean(serverBatch)
     ),
     ssr: { noExternal: ['vitepress', '@docsearch/css'] },
     build: {
@@ -92,14 +102,14 @@ export async function bundle(
       ssr,
       ssrEmitAssets: config.mpa,
       minify: ssr ? !!config.mpa : (options.minify ?? !process.env.DEBUG),
-      outDir: ssr ? config.tempDir : config.outDir,
+      outDir: ssr ? tempDir : config.outDir,
       cssCodeSplit: false,
       rolldownOptions: {
         ...rolldownOptions,
         input: {
           // use different entry based on ssr or not
           app: path.resolve(APP_PATH, ssr ? 'ssr.js' : 'index.js'),
-          ...input
+          ...createInput(pages)
         },
         // important so that each page chunk and the index export things for
         // each other
@@ -173,13 +183,35 @@ export async function bundle(
   let clientResult: Rolldown.RolldownOutput | null = null
   let serverResult!: Rolldown.RolldownOutput
 
-  // prettier-ignore
-  await task('building client + server bundles', async () => {
-    if (!config.mpa) clientResult =
-      (await build(await resolveViteConfig(false))) as Rolldown.RolldownOutput
-    serverResult =
-      (await build(await resolveViteConfig(true))) as Rolldown.RolldownOutput
-  })
+  const buildServerBatch = async (pages: string[], tempDir: string) => {
+    serverResult = (await build(
+      await resolveViteConfig(true, pages, tempDir)
+    )) as Rolldown.RolldownOutput
+  }
+
+  if (serverBatch) {
+    await buildServerBatch(serverBatch.pages, serverBatch.tempDir)
+    return { clientResult, serverResult, pageToHashMap }
+  }
+
+  await task(
+    config.ssrBuildBatchSize
+      ? 'building client bundle'
+      : 'building client + server bundles',
+    async () => {
+      clientResult = config.mpa
+        ? null
+        : ((await build(
+            await resolveViteConfig(false)
+          )) as Rolldown.RolldownOutput)
+
+      if (!config.ssrBuildBatchSize || config.mpa) {
+        serverResult = (await build(
+          await resolveViteConfig(true)
+        )) as Rolldown.RolldownOutput
+      }
+    }
+  )
 
   if (config.mpa) {
     // in MPA mode, we need to copy over the non-js asset files from the
@@ -221,8 +253,8 @@ export async function bundle(
   return { clientResult, serverResult, pageToHashMap: sortedPageToHashMap }
 }
 
-const cache = new Map<string, boolean>()
-const cacheTheme = new Map<string, boolean>()
+export const cache = new Map<string, boolean>()
+export const cacheTheme = new Map<string, boolean>()
 
 /**
  * Check if a module is statically imported by at least one entry.

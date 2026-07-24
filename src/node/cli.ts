@@ -83,6 +83,7 @@ if (!command || command === 'dev') {
   if (command === 'build') {
     build(root, {
       ...argv,
+      __vitepressCli: true,
       onAfterConfigResolve(siteConfig) {
         logVersion(siteConfig.logger)
       }

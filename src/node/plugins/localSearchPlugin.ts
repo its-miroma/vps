@@ -24,9 +24,10 @@ interface IndexObject {
 }
 
 export async function localSearchPlugin(
-  siteConfig: SiteConfig<DefaultTheme.Config>
+  siteConfig: SiteConfig<DefaultTheme.Config>,
+  stubIndex = false
 ): Promise<Plugin> {
-  if (siteConfig.site.themeConfig?.search?.provider !== 'local') {
+  if (stubIndex || siteConfig.site.themeConfig?.search?.provider !== 'local') {
     return {
       name: 'vitepress:local-search',
       resolveId: {

@@ -182,3 +182,16 @@ export async function getGitTimestamp(file: string): Promise<number> {
     throw err
   }
 }
+
+export function snapshotGitTimestamps() {
+  return [...cache].filter(
+    (entry): entry is [string, number] =>
+      typeof entry[1] === 'number' && Number.isFinite(entry[1])
+  )
+}
+
+export function restoreGitTimestamps(entries: [string, number][]) {
+  for (const [file, timestamp] of entries) {
+    cache.set(file, timestamp)
+  }
+}

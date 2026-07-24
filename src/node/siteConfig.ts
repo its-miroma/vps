@@ -223,6 +223,13 @@ export interface UserConfig<
    */
   buildConcurrency?: number
   /**
+   * Limits the number of page entries in each server bundle. The client
+   * bundle still contains every page and is emitted only once.
+   *
+   * @experimental
+   */
+  ssrBuildBatchSize?: number
+  /**
    * Source-to-destination page path mappings, or a function returning
    * the destination path for a source path. Used to serve pages at
    * URLs different from their directory structure.
@@ -384,4 +391,5 @@ export interface SiteConfig<ThemeConfig = any> extends Pick<
    * Number of pages rendered concurrently during the build.
    */
   buildConcurrency: number
+  ssrBuildBatchSize?: number
 }

@@ -70,7 +70,8 @@ export async function createVitePressPlugin(
   ssr = false,
   pageToHashMap?: Record<string, string>,
   clientJSMap?: Record<string, string>,
-  restartServer?: () => Promise<void>
+  restartServer?: () => Promise<void>,
+  stubLocalSearch = false
 ) {
   const {
     srcDir,
@@ -420,7 +421,7 @@ export async function createVitePressPlugin(
     hmrFix,
     webFontsPlugin(siteConfig.useWebFonts),
     ...(userViteConfig?.plugins || []),
-    await localSearchPlugin(siteConfig),
+    await localSearchPlugin(siteConfig, stubLocalSearch),
     staticDataPlugin,
     await dynamicRoutesPlugin(siteConfig)
   ]
