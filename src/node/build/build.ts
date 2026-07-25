@@ -38,8 +38,8 @@ const require = createRequire(import.meta.url)
 
 function disposeBuildCaches() {
   clearCache()
-  // @ts-ignore
-  matter?.clearCache?.()
+  // TODO: ????
+  //matter?.clearCache?.()
   disposeMdItInstance()
   cache.clear()
   cacheTheme.clear()
@@ -186,9 +186,7 @@ async function buildSsrBatchWorker(
   siteConfig.outDir = descriptor.outDir
   siteConfig.ssrBuildBatchSize = undefined
 
-  // @ts-ignore
-  if (typeof restoreGitTimestamps === 'function')
-    restoreGitTimestamps(contract.gitTimestamps)
+  restoreGitTimestamps(contract.gitTimestamps)
 
   fs.mkdirSync(siteConfig.tempDir, { recursive: true })
   const batchTempDir = fs.mkdtempSync(
