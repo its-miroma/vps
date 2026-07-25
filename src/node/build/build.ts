@@ -1,5 +1,5 @@
 import { getIconsCSS } from '@iconify/utils'
-import { spawn } from 'node:child_process'
+import { fork } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
@@ -148,59 +148,132 @@ function workerExecArgv() {
   return result
 }
 
-function runSsrBatchWorker(descriptorPath: string): Promise<void> {
+type PrecomputedPages = Pick<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>
+
+interface ClientBuildMessage {
+  type: 'client-build'
+  root: string
+  base: string
+  outDir: string
+  contractPath: string
+  buildOptions: any
+  precomputedPages: PrecomputedPages
+}
+
+interface SsrBatchMessage {
+  type: 'ssr-batch'
+  root: string
+  base: string
+  outDir: string
+  offset: number
+  pages: string[]
+  serverPages: string[]
+  contractPath: string
+  buildOptions: any
+  precomputedPages: PrecomputedPages
+}
+
+type WorkerMessage = ClientBuildMessage | SsrBatchMessage
+
+// Runs a worker for either a client build or one SSR batch
+function dispatchWorker(message: WorkerMessage): Promise<{ icons?: string[] }> {
   const workerEntry = fileURLToPath(new URL('./ssr-worker.js', import.meta.url))
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [...workerExecArgv(), workerEntry], {
+    const child = fork(workerEntry, {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        VITEPRESS_SSR_BATCH_DESCRIPTOR: descriptorPath
-      },
-      stdio: 'inherit'
+      execArgv: workerExecArgv(),
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc']
+    })
+    let icons: string[] | undefined
+    child.on('message', (msg: any) => {
+      if (msg?.type === 'icons') icons = msg.icons
     })
     child.once('error', reject)
     child.once('exit', (code, signal) => {
       if (code === 0) {
-        resolve()
+        resolve({ icons })
       } else {
         reject(
           new Error(
-            `SSR batch worker failed (${signal ? `signal ${signal}` : `exit ${code}`}).`
+            `Batch worker failed (${signal ? `signal ${signal}` : `exit ${code}`}).`
           )
         )
       }
     })
+    child.send(message)
   })
 }
 
-async function buildSsrBatchWorker(
-  siteConfig: SiteConfig,
-  buildOptions: any,
-  descriptorPath: string
-) {
-  const descriptor = JSON.parse(fs.readFileSync(descriptorPath, 'utf-8'))
-  const contract = JSON.parse(fs.readFileSync(descriptor.contractPath, 'utf-8'))
+export async function runClientBuild(message: ClientBuildMessage) {
+  const siteConfig = await resolveConfig(
+    message.root,
+    'build',
+    'production',
+    message.precomputedPages
+  )
+  siteConfig.site.base = message.base
+  siteConfig.outDir = message.outDir
 
-  siteConfig.site.base = descriptor.base
-  siteConfig.outDir = descriptor.outDir
+  try {
+    const { clientResult, serverResult, pageToHashMap } = await bundle(
+      siteConfig,
+      message.buildOptions
+    )
+
+    const renderMetadata = createRenderMetadata(
+      siteConfig,
+      clientResult,
+      serverResult
+    )
+    const additionalHeadTags = createAdditionalHeadTags(renderMetadata)
+    const metadataScript = generateMetadataScript(pageToHashMap, siteConfig)
+    const gitTimestamps = snapshotGitTimestamps()
+
+    fs.writeFileSync(
+      message.contractPath,
+      JSON.stringify({
+        renderMetadata: serializeRenderMetadata(renderMetadata),
+        pageToHashMap,
+        metadataScript,
+        additionalHeadTags,
+        gitTimestamps
+      })
+    )
+  } finally {
+    disposeBuildCaches()
+    globalThis.gc?.()
+  }
+}
+
+export async function runSsrBatch(message: SsrBatchMessage): Promise<string[]> {
+  const siteConfig = await resolveConfig(
+    message.root,
+    'build',
+    'production',
+    message.precomputedPages
+  )
+  const contract = JSON.parse(fs.readFileSync(message.contractPath, 'utf-8'))
+
+  siteConfig.site.base = message.base
+  siteConfig.outDir = message.outDir
   siteConfig.ssrBuildBatchSize = undefined
 
   restoreGitTimestamps(contract.gitTimestamps)
 
   fs.mkdirSync(siteConfig.tempDir, { recursive: true })
   const batchTempDir = fs.mkdtempSync(
-    path.join(siteConfig.tempDir, `ssr-${descriptor.offset}-`)
+    path.join(siteConfig.tempDir, `ssr-${message.offset}-`)
   )
   siteConfig.tempDir = batchTempDir
   const usedIcons = new Set<string>()
 
   try {
-    await bundle(siteConfig, buildOptions, {
-      pages: descriptor.serverPages,
+    await bundle(siteConfig, message.buildOptions, {
+      pages: message.serverPages,
       tempDir: batchTempDir
     })
     disposeBuildCaches()
+    globalThis.gc?.()
 
     const entryPath = path.join(batchTempDir, 'app.js')
     const { render } = await nativeImport(entryPath)
@@ -209,23 +282,22 @@ async function buildSsrBatchWorker(
       render,
       siteConfig,
       batchTempDir,
-      descriptor.pages,
+      message.pages,
       deserializeRenderMetadata(contract.renderMetadata),
       contract.pageToHashMap,
       contract.metadataScript,
       contract.additionalHeadTags,
       usedIcons
     )
-    fs.writeFileSync(
-      descriptor.iconsPath,
-      JSON.stringify([...usedIcons].sort())
-    )
   } finally {
     disposeBuildCaches()
+    globalThis.gc?.()
     if (!process.env.DEBUG) {
       fs.rmSync(batchTempDir, { recursive: true, force: true })
     }
   }
+
+  return [...usedIcons].sort()
 }
 
 export async function build(
@@ -240,11 +312,6 @@ export async function build(
   const start = Date.now()
 
   process.env.NODE_ENV = 'production'
-
-  const workerDescriptorPath = process.env.VITEPRESS_SSR_BATCH_DESCRIPTOR
-  if (workerDescriptorPath) {
-    delete process.env.VITEPRESS_SSR_BATCH_DESCRIPTOR
-  }
 
   const invokedFromCli = buildOptions.__vitepressCli === true
   delete buildOptions.__vitepressCli
@@ -269,16 +336,6 @@ export async function build(
   if (buildOptions.outDir) {
     siteConfig.outDir = path.resolve(process.cwd(), buildOptions.outDir)
     delete buildOptions.outDir
-  }
-
-  if (workerDescriptorPath) {
-    const unlinkVue = linkVue()
-    try {
-      await buildSsrBatchWorker(siteConfig, buildOptions, workerDescriptorPath)
-    } finally {
-      unlinkVue()
-    }
-    return
   }
 
   if (
@@ -316,58 +373,55 @@ export async function build(
         `${invalidBuildOption} is not JSON-serializable and cannot be transferred to SSR batch worker processes.`
       )
     }
+
+    const batchCount = Math.ceil(
+      (siteConfig.pages.length + 1) / siteConfig.ssrBuildBatchSize
+    )
+    if (batchCount > 50) {
+      siteConfig.logger.warn(
+        `ssrBuildBatchSize is ${siteConfig.ssrBuildBatchSize}, which will spawn ${batchCount} worker processes for this build. ` +
+          `Each worker pays a fixed startup cost (roughly 100-200MB of memory and a couple of seconds) regardless of batch size, ` +
+          `so a lot of small batches trades build time for little or no extra memory savings. Consider a larger ssrBuildBatchSize ` +
+          `(aiming for roughly 10-30 batches total) unless you've confirmed smaller batches are needed to stay under your memory budget.`
+      )
+    }
+    siteConfig.logger.info(
+      `ssrBuildBatchSize is set: this limits memory for the server/SSR bundling + rendering step only. ` +
+        `The client bundle is still built once, in a single process, covering every page.`
+    )
   }
 
   const unlinkVue = linkVue()
 
   try {
-    let { clientResult, serverResult, pageToHashMap } = await bundle(
-      siteConfig,
-      buildOptions
-    )
-
-    if (process.env.BUNDLE_ONLY) {
-      disposeBuildCaches()
-      return
-    }
-
-    const renderMetadata = createRenderMetadata(
-      siteConfig,
-      clientResult,
-      serverResult
-    )
-
-    clientResult = null
-    // @ts-ignore
-    serverResult = null
-
-    const additionalHeadTags = createAdditionalHeadTags(renderMetadata)
-    const metadataScript = generateMetadataScript(pageToHashMap, siteConfig)
-
-    const gitTimestamps = snapshotGitTimestamps()
-
-    disposeBuildCaches()
-    globalThis.gc?.()
-
     const usedIcons = /* @__PURE__ */ new Set<string>()
+    let pageToHashMap: Record<string, string>
 
     if (siteConfig.ssrBuildBatchSize) {
+      const precomputedPages: PrecomputedPages = {
+        pages: siteConfig.pages,
+        dynamicRoutes: siteConfig.dynamicRoutes,
+        rewrites: siteConfig.rewrites
+      }
+
       fs.mkdirSync(siteConfig.tempDir, { recursive: true })
       const coordinatorDir = fs.mkdtempSync(
         path.join(siteConfig.tempDir, 'ssr-coordinator-')
       )
       const contractPath = path.join(coordinatorDir, 'contract.json')
 
-      fs.writeFileSync(
+      await dispatchWorker({
+        type: 'client-build',
+        root: siteConfig.root,
+        base: siteConfig.site.base,
+        outDir: siteConfig.outDir,
         contractPath,
-        JSON.stringify({
-          renderMetadata: serializeRenderMetadata(renderMetadata),
-          pageToHashMap,
-          metadataScript,
-          additionalHeadTags,
-          gitTimestamps
-        })
-      )
+        buildOptions,
+        precomputedPages
+      })
+
+      const contract = JSON.parse(fs.readFileSync(contractPath, 'utf-8'))
+      pageToHashMap = contract.pageToHashMap
 
       const renderQueue = ['404.md', ...siteConfig.pages]
       const sourcePages = new Set(siteConfig.pages)
@@ -385,38 +439,54 @@ export async function build(
           const serverPages = [
             ...new Set(pages.filter((page) => sourcePages.has(page)))
           ]
-          const descriptorPath = path.join(
-            coordinatorDir,
-            `batch-${offset}.json`
-          )
-          const iconsPath = path.join(coordinatorDir, `icons-${offset}.json`)
 
-          fs.writeFileSync(
-            descriptorPath,
-            JSON.stringify({
-              root: siteConfig.root,
-              base: siteConfig.site.base,
-              outDir: siteConfig.outDir,
-              offset,
-              pages,
-              serverPages,
-              contractPath,
-              iconsPath,
-              buildOptions
-            })
-          )
+          const { icons } = await dispatchWorker({
+            type: 'ssr-batch',
+            root: siteConfig.root,
+            base: siteConfig.site.base,
+            outDir: siteConfig.outDir,
+            offset,
+            pages,
+            serverPages,
+            contractPath,
+            buildOptions,
+            precomputedPages
+          })
 
-          await runSsrBatchWorker(descriptorPath)
-
-          const iconsInBatch: string[] = JSON.parse(
-            fs.readFileSync(iconsPath, 'utf-8')
-          )
-          for (const icon of iconsInBatch) {
+          for (const icon of icons ?? []) {
             usedIcons.add(icon)
           }
         }
       })
     } else {
+      let {
+        clientResult,
+        serverResult,
+        pageToHashMap: unbatchedPageToHashMap
+      } = await bundle(siteConfig, buildOptions)
+      pageToHashMap = unbatchedPageToHashMap
+
+      if (process.env.BUNDLE_ONLY) {
+        disposeBuildCaches()
+        return
+      }
+
+      const renderMetadata = createRenderMetadata(
+        siteConfig,
+        clientResult,
+        serverResult
+      )
+
+      clientResult = null
+      // @ts-ignore
+      serverResult = null
+
+      const additionalHeadTags = createAdditionalHeadTags(renderMetadata)
+      const metadataScript = generateMetadataScript(pageToHashMap, siteConfig)
+
+      disposeBuildCaches()
+      globalThis.gc?.()
+
       const entryPath = path.join(siteConfig.tempDir, 'app.js')
       const { render } = await nativeImport(entryPath)
 
@@ -472,7 +542,7 @@ export async function build(
   )
 }
 
-function linkVue() {
+export function linkVue() {
   const root = packageDirectorySync()
   if (root) {
     const dest = path.resolve(root, 'node_modules/vue')

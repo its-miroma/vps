@@ -81,7 +81,8 @@ export function defineConfigWithTheme<ThemeConfig>(
 export async function resolveConfig(
   root: string = process.cwd(),
   command: 'serve' | 'build' = 'serve',
-  mode = 'development'
+  mode = 'development',
+  precomputedPages?: Pick<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>
 ): Promise<SiteConfig> {
   // normalize root into absolute path
   root = normalizePath(path.resolve(root))
@@ -177,7 +178,7 @@ export async function resolveConfig(
   global.VITEPRESS_CONFIG = config
 
   // resolve pages after setting global, so that path loaders can access it
-  await resolvePages(config, true)
+  await resolvePages(config, true, precomputedPages)
 
   return config as SiteConfig
 }
