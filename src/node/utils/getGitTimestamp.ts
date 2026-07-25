@@ -3,10 +3,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { Transform, type TransformCallback } from 'node:stream'
 import { createDebug } from 'obug'
+import PQueue from 'p-queue'
 import { slash } from '../shared'
 
 const debug = createDebug('vitepress:git')
-const cache = new Map<string, number>()
+const cache = new Map<string, number | Promise<number>>()
+const gitQueue = new PQueue({ concurrency: 16 })
 
 const RS = 0x1e
 const NUL = 0x00
@@ -141,31 +143,42 @@ export async function cacheAllGitTimestamps(
 
 export async function getGitTimestamp(file: string): Promise<number> {
   const cached = cache.get(file)
-  if (cached) return cached
+  if (cached !== undefined) return cached
 
   // most likely will never happen except for recently added files in dev
   debug(`[cache miss] ${file}`)
 
   if (!fs.existsSync(file)) return 0
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      'git',
-      ['log', '-1', '--pretty=%at', '--', path.basename(file)],
-      { cwd: path.dirname(file) }
-    )
+  const pending = gitQueue.add(
+    () =>
+      new Promise<number>((resolve, reject) => {
+        const child = spawn(
+          'git',
+          ['log', '-1', '--pretty=%at', '--', path.basename(file)],
+          { cwd: path.dirname(file) }
+        )
 
-    let output = ''
-    child.stdout.on('data', (d) => (output += String(d)))
+        let output = ''
+        child.stdout.on('data', (d) => (output += String(d)))
 
-    child.on('close', () => {
-      const ts = Number.parseInt(output.trim(), 10) * 1000
-      if (!(ts > 0)) return resolve(0)
+        child.on('close', () => {
+          const ts = Number.parseInt(output.trim(), 10) * 1000
+          resolve(ts > 0 ? ts : 0)
+        })
 
-      cache.set(file, ts)
-      resolve(ts)
-    })
+        child.on('error', reject)
+      })
+  )
 
-    child.on('error', reject)
-  })
+  cache.set(file, pending)
+
+  try {
+    const timestamp = await pending
+    cache.set(file, timestamp)
+    return timestamp
+  } catch (err) {
+    cache.delete(file)
+    throw err
+  }
 }

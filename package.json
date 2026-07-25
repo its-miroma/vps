@@ -168,6 +168,7 @@
     "obug": "^2.1.4",
     "ora": "^9.4.1",
     "p-map": "^7.0.6",
+    "p-queue": "^9.3.3",
     "package-directory": "^8.2.0",
     "path-to-regexp": "^6.3.0",
     "picocolors": "^1.1.1",
