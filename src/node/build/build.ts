@@ -454,6 +454,13 @@ export async function build(
     )
   } finally {
     unlinkVue()
+    if (!process.env.DEBUG) {
+      fs.rmSync(siteConfig.tempDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 10
+      })
+    }
   }
 
   await generateSitemap(siteConfig)

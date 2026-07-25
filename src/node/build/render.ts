@@ -63,14 +63,19 @@ export function createRenderMetadata(
   const isDefaultTheme = clientOutput.some(
     (chunk): chunk is Rolldown.OutputChunk =>
       chunk.type === 'chunk' &&
-      // @ts-ignore
-      (vite?.rolldownVersion || chunk.name === 'theme') &&
+      chunk.name === 'theme' &&
       chunk.moduleIds.some((id) => id.includes('client/theme-default'))
   )
 
   const pageChunks = new Map<string, string[] | PageChunkInfo>()
   for (const chunk of clientOutput) {
-    if (chunk.type !== 'chunk' || !chunk.facadeModuleId) continue
+    if (
+      chunk.type !== 'chunk' ||
+      !chunk.isEntry ||
+      !chunk.facadeModuleId?.endsWith('.md')
+    ) {
+      continue
+    }
     const facadeModuleId = normalizePath(chunk.facadeModuleId)
     pageChunks.set(
       facadeModuleId,
