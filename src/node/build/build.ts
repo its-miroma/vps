@@ -38,11 +38,10 @@ const require = createRequire(import.meta.url)
 
 function disposeBuildCaches() {
   clearCache()
-  // TODO: ????
-  //matter?.clearCache?.()
   disposeMdItInstance()
   cache.clear()
   cacheTheme.clear()
+  // TODO: globalThis.gc?.() ?
 }
 
 function createAdditionalHeadTags(
@@ -148,35 +147,29 @@ function workerExecArgv() {
   return result
 }
 
-type PrecomputedPages = Pick<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>
-
-interface ClientBuildMessage {
-  type: 'client-build'
+interface _BaseMessage {
   root: string
   base: string
   outDir: string
   contractPath: string
   buildOptions: any
-  precomputedPages: PrecomputedPages
+  precomputedPages: Pick<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>
 }
 
-interface SsrBatchMessage {
+interface ClientBuildMessage extends _BaseMessage {
+  type: 'client-build'
+}
+
+interface SsrBatchMessage extends _BaseMessage {
   type: 'ssr-batch'
-  root: string
-  base: string
-  outDir: string
   offset: number
   pages: string[]
   serverPages: string[]
-  contractPath: string
-  buildOptions: any
-  precomputedPages: PrecomputedPages
 }
 
-type WorkerMessage = ClientBuildMessage | SsrBatchMessage
-
-// Runs a worker for either a client build or one SSR batch
-function dispatchWorker(message: WorkerMessage): Promise<{ icons?: string[] }> {
+function dispatchWorker(
+  message: ClientBuildMessage | SsrBatchMessage
+): Promise<{ icons?: string[] }> {
   const workerEntry = fileURLToPath(new URL('./ssr-worker.js', import.meta.url))
   return new Promise((resolve, reject) => {
     const child = fork(workerEntry, {
@@ -185,8 +178,8 @@ function dispatchWorker(message: WorkerMessage): Promise<{ icons?: string[] }> {
       stdio: ['inherit', 'inherit', 'inherit', 'ipc']
     })
     let icons: string[] | undefined
-    child.on('message', (msg: any) => {
-      if (msg?.type === 'icons') icons = msg.icons
+    child.on('message', (message: any) => {
+      if (message?.type === 'icons') icons = message.icons
     })
     child.once('error', reject)
     child.once('exit', (code, signal) => {
@@ -398,7 +391,10 @@ export async function build(
     let pageToHashMap: Record<string, string>
 
     if (siteConfig.ssrBuildBatchSize) {
-      const precomputedPages: PrecomputedPages = {
+      const precomputedPages: Pick<
+        SiteConfig,
+        'pages' | 'dynamicRoutes' | 'rewrites'
+      > = {
         pages: siteConfig.pages,
         dynamicRoutes: siteConfig.dynamicRoutes,
         rewrites: siteConfig.rewrites
@@ -505,6 +501,7 @@ export async function build(
       })
     }
 
+    // TODO: await import ?
     const icons = require('@iconify-json/simple-icons/icons.json')
     const iconsCss = getIconsCSS(icons, Array.from(usedIcons).sort(), {
       iconSelector: '.vpi-social-{name}',
