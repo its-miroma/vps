@@ -75,8 +75,21 @@ type Optional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>
 
 export async function resolvePages(
   siteConfig: Optional<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>,
-  rebuildCache = false
+  rebuildCache = false,
+  precomputed?: Pick<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>
 ): Promise<void> {
+  if (precomputed) {
+    Object.assign(siteConfig, {
+      pages: precomputed.pages,
+      dynamicRoutes: precomputed.dynamicRoutes,
+      rewrites: precomputed.rewrites,
+      // @ts-expect-error internal flag to reload resolution cache in ../markdownToVue.ts
+      __dirty: true
+    } satisfies Partial<SiteConfig>)
+    discoveredPages = new Set(precomputed.pages)
+    return
+  }
+
   if (rebuildCache) {
     moduleGraph = new ModuleGraph()
     routeModuleCache.clear()

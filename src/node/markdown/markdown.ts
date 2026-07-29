@@ -516,6 +516,7 @@ export async function createMarkdownRenderer(
   if (options.component !== false) {
     componentPlugin(md, normalizePluginOptions(options.component))
   }
+  ;(options.frontmatter ??= {}).grayMatterOptions ??= {}
   frontmatterPlugin(md, options.frontmatter)
   if (options.headers) {
     headersPlugin(md, {

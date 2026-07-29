@@ -223,6 +223,19 @@ export interface UserConfig<
    */
   buildConcurrency?: number
   /**
+   * Splits server-side bundling + rendering across multiple worker
+   * processes, each handling at most this many pages, to bound peak
+   * memory on large sites. Does not affect the client bundle.
+   *
+   * Each worker process loads and evaluates your config file
+   * independently, so it must be safe to import more than once per
+   * build. Avoid non-idempotent side effects (network calls, database
+   * reads, writes) in it, or memoize them yourself.
+   * @experimental
+   */
+  // TODO: link a docs page covering batch-size tradeoffs once one exists
+  ssrBuildBatchSize?: number
+  /**
    * Source-to-destination page path mappings, or a function returning
    * the destination path for a source path. Used to serve pages at
    * URLs different from their directory structure.
@@ -384,4 +397,9 @@ export interface SiteConfig<ThemeConfig = any> extends Pick<
    * Number of pages rendered concurrently during the build.
    */
   buildConcurrency: number
+  /**
+   * Number of pages rendered by each worker.
+   */
+  // TODO: drop "ssr" ?
+  ssrBuildBatchSize?: number
 }
