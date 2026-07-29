@@ -229,11 +229,11 @@ export interface UserConfig<
    *
    * Each worker process loads and evaluates your config file
    * independently, so it must be safe to import more than once per
-   * build — avoid non-idempotent side effects (network calls, database
+   * build. Avoid non-idempotent side effects (network calls, database
    * reads, writes) in it, or memoize them yourself.
    * @experimental
-   * TODO: link a docs page covering batch-size tradeoffs once one exists
    */
+  // TODO: link a docs page covering batch-size tradeoffs once one exists
   ssrBuildBatchSize?: number
   /**
    * Source-to-destination page path mappings, or a function returning
@@ -397,5 +397,9 @@ export interface SiteConfig<ThemeConfig = any> extends Pick<
    * Number of pages rendered concurrently during the build.
    */
   buildConcurrency: number
+  /**
+   * Number of pages rendered by each worker.
+   */
+  // TODO: drop "ssr" ?
   ssrBuildBatchSize?: number
 }

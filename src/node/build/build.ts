@@ -1,7 +1,7 @@
 import { getIconsCSS } from '@iconify/utils'
 import { fork } from 'node:child_process'
-import { createRequire } from 'node:module'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { BuildOptions } from 'vite'
@@ -22,37 +22,6 @@ import {
 } from './worker'
 
 const require = createRequire(import.meta.url)
-
-function findNonJsonValue(
-  value: any,
-  path2 = 'buildOptions',
-  seen = new Set()
-): string | undefined {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return
-  }
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? undefined : path2
-  }
-  if (typeof value !== 'object') {
-    return path2
-  }
-  if (seen.has(value)) return path2
-  seen.add(value)
-  if (!Array.isArray(value)) {
-    const prototype = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) return path2
-  }
-  for (const [key, nested] of Object.entries(value)) {
-    const invalidPath = findNonJsonValue(nested, `${path2}.${key}`, seen)
-    if (invalidPath) return invalidPath
-  }
-  seen.delete(value)
-}
 
 function workerExecArgv() {
   const result: string[] = []
@@ -138,11 +107,10 @@ export async function build(
     delete buildOptions.outDir
   }
 
+  siteConfig.ssrBuildBatchSize ??= 0
   if (
-    siteConfig.ssrBuildBatchSize != null &&
-    siteConfig.ssrBuildBatchSize !== 0 &&
-    (!Number.isInteger(siteConfig.ssrBuildBatchSize) ||
-      siteConfig.ssrBuildBatchSize < 1)
+    !Number.isInteger(siteConfig.ssrBuildBatchSize) ||
+    siteConfig.ssrBuildBatchSize < 0
   ) {
     throw new Error('ssrBuildBatchSize must be a positive integer.')
   }
@@ -152,18 +120,7 @@ export async function build(
   }
 
   if (process.env.BUNDLE_ONLY && siteConfig.ssrBuildBatchSize) {
-    throw new Error(
-      'BUNDLE_ONLY is not compatible with ssrBuildBatchSize because batched server bundles are rendered and disposed incrementally.'
-    )
-  }
-
-  if (siteConfig.ssrBuildBatchSize) {
-    const invalidBuildOption = findNonJsonValue(buildOptions)
-    if (invalidBuildOption) {
-      throw new Error(
-        `${invalidBuildOption} is not JSON-serializable and cannot be transferred to SSR batch worker processes.`
-      )
-    }
+    throw new Error('BUNDLE_ONLY is not compatible with ssrBuildBatchSize.')
   }
 
   const unlinkVue = linkVue()
