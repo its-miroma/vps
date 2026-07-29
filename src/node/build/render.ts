@@ -29,7 +29,10 @@ export interface RenderMetadata {
   cssChunk?: { fileName: string }
   assets: string[]
   isDefaultTheme: boolean
-  pageChunks: Map<string, string[] | PageChunkInfo>
+  // non-mpa: page's facadeModuleId -> its chunk imports, for preload/prefetch
+  pageImports: Map<string, string[]>
+  // mpa: page's facadeModuleId -> its inlineable chunk, for script inlining
+  pageChunks: Map<string, PageChunkInfo>
 }
 
 export function createRenderMetadata(
@@ -67,7 +70,8 @@ export function createRenderMetadata(
       chunk.moduleIds.some((id) => id.includes('client/theme-default'))
   )
 
-  const pageChunks = new Map<string, string[] | PageChunkInfo>()
+  const pageImports = new Map<string, string[]>()
+  const pageChunks = new Map<string, PageChunkInfo>()
   for (const chunk of clientOutput) {
     if (
       chunk.type !== 'chunk' ||
@@ -77,12 +81,14 @@ export function createRenderMetadata(
       continue
     }
     const facadeModuleId = normalizePath(chunk.facadeModuleId)
-    pageChunks.set(
-      facadeModuleId,
-      config.mpa
-        ? { fileName: chunk.fileName, code: chunk.code }
-        : [...chunk.imports]
-    )
+    if (config.mpa) {
+      pageChunks.set(facadeModuleId, {
+        fileName: chunk.fileName,
+        code: chunk.code
+      })
+    } else {
+      pageImports.set(facadeModuleId, [...chunk.imports])
+    }
   }
 
   return {
@@ -93,6 +99,7 @@ export function createRenderMetadata(
     cssChunk: cssChunk ? { fileName: cssChunk.fileName } : undefined,
     assets,
     isDefaultTheme,
+    pageImports,
     pageChunks
   }
 }
@@ -100,6 +107,7 @@ export function createRenderMetadata(
 export function serializeRenderMetadata(renderMetadata: RenderMetadata) {
   return {
     ...renderMetadata,
+    pageImports: [...renderMetadata.pageImports],
     pageChunks: [...renderMetadata.pageChunks]
   }
 }
@@ -107,6 +115,7 @@ export function serializeRenderMetadata(renderMetadata: RenderMetadata) {
 export function deserializeRenderMetadata(renderMetadata: any): RenderMetadata {
   return {
     ...renderMetadata,
+    pageImports: new Map(renderMetadata.pageImports),
     pageChunks: new Map(renderMetadata.pageChunks)
   }
 }
@@ -122,7 +131,7 @@ export async function renderPage(
   usedIcons: Set<string>,
   serverTempDir: string = config.tempDir
 ) {
-  const { appChunk, cssChunk, assets, pageChunks } = renderMetadata
+  const { appChunk, cssChunk, assets, pageImports, pageChunks } = renderMetadata
   const routePath = `/${page.replace(/\.md$/, '')}`
   const siteData = resolveSiteDataByRoute(config.site, page)
 
@@ -175,7 +184,7 @@ export async function renderPage(
               // resolve imports for index.js + page.md.js and inject script tags
               // for them as well so we fetch everything as early as possible
               // without having to wait for entry chunks to parse
-              ...resolvePageImports(config, page, pageChunks, appChunk),
+              ...resolvePageImports(config, page, pageImports, appChunk),
               pageClientJsFileName
             ])
           ]
@@ -231,7 +240,7 @@ export async function renderPage(
   if (config.mpa) {
     const matchingChunk = pageChunks.get(
       normalizePath(path.join(config.srcDir, page))
-    ) as PageChunkInfo | undefined
+    )
 
     if (matchingChunk) {
       if (!matchingChunk.code.includes('import')) {
@@ -299,7 +308,7 @@ export async function renderPage(
 function resolvePageImports(
   config: SiteConfig,
   page: string,
-  pageChunks: Map<string, string[] | PageChunkInfo>,
+  pageImports: Map<string, string[]>,
   appChunk: { fileName: string; imports: string[] }
 ) {
   page = config.rewrites.inv[page] || page
@@ -315,11 +324,11 @@ function resolvePageImports(
     // fail, which is expected
   }
   srcPath = normalizePath(srcPath)
-  const pageImports = (pageChunks.get(srcPath) as string[]) || []
+  const imports = pageImports.get(srcPath) || []
   return [
     ...appChunk.imports,
     // ...appChunk.dynamicImports,
-    ...pageImports
+    ...imports
     // ...pageChunk.dynamicImports
   ]
 }

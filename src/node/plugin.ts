@@ -71,7 +71,7 @@ export async function createVitePressPlugin(
   pageToHashMap?: Record<string, string>,
   clientJSMap?: Record<string, string>,
   restartServer?: () => Promise<void>,
-  stubLocalSearch = false
+  isBatchWorker = false
 ) {
   const {
     srcDir,
@@ -118,7 +118,7 @@ export async function createVitePressPlugin(
       // vite config, or altered by other vite plugins)
       siteConfig.publicDir = config.publicDir
       // pre-resolve git timestamps
-      if (lastUpdated) await cacheAllGitTimestamps(srcDir)
+      if (lastUpdated && !isBatchWorker) await cacheAllGitTimestamps(srcDir)
       markdownToVue = await createMarkdownToVueRenderFn(
         srcDir,
         markdown,
@@ -421,7 +421,7 @@ export async function createVitePressPlugin(
     hmrFix,
     webFontsPlugin(siteConfig.useWebFonts),
     ...(userViteConfig?.plugins || []),
-    await localSearchPlugin(siteConfig, stubLocalSearch),
+    await localSearchPlugin(siteConfig, isBatchWorker),
     staticDataPlugin,
     await dynamicRoutesPlugin(siteConfig)
   ]

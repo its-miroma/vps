@@ -3,12 +3,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { Transform, type TransformCallback } from 'node:stream'
 import { createDebug } from 'obug'
-import PQueue from 'p-queue'
+import pLimit from 'p-limit'
 import { slash } from '../shared'
 
 const debug = createDebug('vitepress:git')
 const cache = new Map<string, number | Promise<number>>()
-const gitQueue = new PQueue({ concurrency: 16 })
+const limitGit = pLimit(16)
 
 const RS = 0x1e
 const NUL = 0x00
@@ -150,7 +150,7 @@ export async function getGitTimestamp(file: string): Promise<number> {
 
   if (!fs.existsSync(file)) return 0
 
-  const pending = gitQueue.add(
+  const pending = limitGit(
     () =>
       new Promise<number>((resolve, reject) => {
         const child = spawn(

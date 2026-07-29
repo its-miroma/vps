@@ -1,102 +1,27 @@
 import { getIconsCSS } from '@iconify/utils'
 import { fork } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import fs from 'node:fs'
 import { createRequire } from 'node:module'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import pMap from 'p-map'
-import { packageDirectorySync } from 'package-directory'
 import type { BuildOptions } from 'vite'
 import { resolveConfig, type SiteConfig } from '../config'
-import { disposeMdItInstance } from '../markdown/markdown'
-import { clearCache } from '../markdownToVue'
-import {
-  slash,
-  type Awaitable,
-  type HeadConfig,
-  type SSGContext
-} from '../shared'
-import { deserializeFunctions, serializeFunctions } from '../utils/fnSerialize'
-import {
-  restoreGitTimestamps,
-  snapshotGitTimestamps
-} from '../utils/getGitTimestamp'
-import { nativeImport } from '../utils/nativeImport'
+import type { Awaitable } from '../shared'
+import { linkVue } from '../utils/linkVue'
+import { logVersion } from '../utils/logVersion'
 import { task } from '../utils/task'
-import { bundle, cache, cacheTheme } from './bundle'
+import { bundle } from './bundle'
 import { generateSitemap } from './generateSitemap'
 import {
-  createRenderMetadata,
-  deserializeRenderMetadata,
-  renderPage,
-  serializeRenderMetadata,
-  type RenderMetadata
-} from './render'
+  disposeBuildCaches,
+  getRenderer,
+  prepareRenderInputs,
+  renderPages,
+  type ClientBuildMessage,
+  type SsrBatchMessage
+} from './worker'
 
 const require = createRequire(import.meta.url)
-
-function disposeBuildCaches() {
-  clearCache()
-  disposeMdItInstance()
-  cache.clear()
-  cacheTheme.clear()
-  // TODO: globalThis.gc?.() ?
-}
-
-function createAdditionalHeadTags(
-  renderMetadata: RenderMetadata
-): HeadConfig[] {
-  const additionalHeadTags: HeadConfig[] = []
-  if (renderMetadata.isDefaultTheme) {
-    const fontURL = renderMetadata.assets.find((file) =>
-      /inter-roman-latin\.[\w-]+\.woff2/.test(file)
-    )
-    if (fontURL) {
-      additionalHeadTags.push([
-        'link',
-        {
-          rel: 'preload',
-          href: fontURL,
-          as: 'font',
-          type: 'font/woff2',
-          crossorigin: ''
-        }
-      ])
-    }
-  }
-  return additionalHeadTags
-}
-
-async function renderPages(
-  render: (path: string) => Promise<SSGContext>,
-  siteConfig: SiteConfig,
-  serverTempDir: string,
-  pages: string[],
-  renderMetadata: RenderMetadata,
-  pageToHashMap: Record<string, string>,
-  metadataScript: { html: string; inHead: boolean },
-  additionalHeadTags: HeadConfig[],
-  usedIcons: Set<string>
-) {
-  await pMap(
-    pages,
-    async (page) => {
-      await renderPage(
-        render,
-        siteConfig,
-        siteConfig.rewrites.map[page] || page,
-        renderMetadata,
-        pageToHashMap,
-        metadataScript,
-        additionalHeadTags,
-        usedIcons,
-        serverTempDir
-      )
-    },
-    { concurrency: siteConfig.buildConcurrency }
-  )
-}
 
 function findNonJsonValue(
   value: any,
@@ -147,30 +72,10 @@ function workerExecArgv() {
   return result
 }
 
-interface _BaseMessage {
-  root: string
-  base: string
-  outDir: string
-  contractPath: string
-  buildOptions: any
-  precomputedPages: Pick<SiteConfig, 'pages' | 'dynamicRoutes' | 'rewrites'>
-}
-
-interface ClientBuildMessage extends _BaseMessage {
-  type: 'client-build'
-}
-
-interface SsrBatchMessage extends _BaseMessage {
-  type: 'ssr-batch'
-  offset: number
-  pages: string[]
-  serverPages: string[]
-}
-
 function dispatchWorker(
   message: ClientBuildMessage | SsrBatchMessage
 ): Promise<{ icons?: string[] }> {
-  const workerEntry = fileURLToPath(new URL('./ssr-worker.js', import.meta.url))
+  const workerEntry = fileURLToPath(new URL('./ssrWorker.js', import.meta.url))
   return new Promise((resolve, reject) => {
     const child = fork(workerEntry, {
       cwd: process.cwd(),
@@ -197,108 +102,11 @@ function dispatchWorker(
   })
 }
 
-export async function runClientBuild(message: ClientBuildMessage) {
-  const siteConfig = await resolveConfig(
-    message.root,
-    'build',
-    'production',
-    message.precomputedPages
-  )
-  siteConfig.site.base = message.base
-  siteConfig.outDir = message.outDir
-
-  try {
-    const { clientResult, serverResult, pageToHashMap } = await bundle(
-      siteConfig,
-      message.buildOptions
-    )
-
-    const renderMetadata = createRenderMetadata(
-      siteConfig,
-      clientResult,
-      serverResult
-    )
-    const additionalHeadTags = createAdditionalHeadTags(renderMetadata)
-    const metadataScript = generateMetadataScript(pageToHashMap, siteConfig)
-    const gitTimestamps = snapshotGitTimestamps()
-
-    fs.writeFileSync(
-      message.contractPath,
-      JSON.stringify({
-        renderMetadata: serializeRenderMetadata(renderMetadata),
-        pageToHashMap,
-        metadataScript,
-        additionalHeadTags,
-        gitTimestamps
-      })
-    )
-  } finally {
-    disposeBuildCaches()
-    globalThis.gc?.()
-  }
-}
-
-export async function runSsrBatch(message: SsrBatchMessage): Promise<string[]> {
-  const siteConfig = await resolveConfig(
-    message.root,
-    'build',
-    'production',
-    message.precomputedPages
-  )
-  const contract = JSON.parse(fs.readFileSync(message.contractPath, 'utf-8'))
-
-  siteConfig.site.base = message.base
-  siteConfig.outDir = message.outDir
-  siteConfig.ssrBuildBatchSize = undefined
-
-  restoreGitTimestamps(contract.gitTimestamps)
-
-  fs.mkdirSync(siteConfig.tempDir, { recursive: true })
-  const batchTempDir = fs.mkdtempSync(
-    path.join(siteConfig.tempDir, `ssr-${message.offset}-`)
-  )
-  siteConfig.tempDir = batchTempDir
-  const usedIcons = new Set<string>()
-
-  try {
-    await bundle(siteConfig, message.buildOptions, {
-      pages: message.serverPages,
-      tempDir: batchTempDir
-    })
-    disposeBuildCaches()
-    globalThis.gc?.()
-
-    const entryPath = path.join(batchTempDir, 'app.js')
-    const { render } = await nativeImport(entryPath)
-
-    await renderPages(
-      render,
-      siteConfig,
-      batchTempDir,
-      message.pages,
-      deserializeRenderMetadata(contract.renderMetadata),
-      contract.pageToHashMap,
-      contract.metadataScript,
-      contract.additionalHeadTags,
-      usedIcons
-    )
-  } finally {
-    disposeBuildCaches()
-    globalThis.gc?.()
-    if (!process.env.DEBUG) {
-      fs.rmSync(batchTempDir, { recursive: true, force: true })
-    }
-  }
-
-  return [...usedIcons].sort()
-}
-
 export async function build(
   root?: string,
   buildOptions: BuildOptions & {
     base?: string
     mpa?: string
-    __vitepressCli?: boolean
     onAfterConfigResolve?: (siteConfig: SiteConfig) => Awaitable<void>
   } = {}
 ) {
@@ -306,14 +114,13 @@ export async function build(
 
   process.env.NODE_ENV = 'production'
 
-  const invokedFromCli = buildOptions.__vitepressCli === true
-  delete buildOptions.__vitepressCli
-
-  const hasAfterConfigResolve =
-    typeof buildOptions.onAfterConfigResolve === 'function'
   const siteConfig = await resolveConfig(root, 'build', 'production')
 
-  await buildOptions.onAfterConfigResolve?.(siteConfig)
+  if (buildOptions.onAfterConfigResolve) {
+    await buildOptions.onAfterConfigResolve(siteConfig)
+  } else {
+    logVersion(siteConfig.logger)
+  }
   delete buildOptions.onAfterConfigResolve
 
   if (buildOptions.base) {
@@ -333,6 +140,7 @@ export async function build(
 
   if (
     siteConfig.ssrBuildBatchSize != null &&
+    siteConfig.ssrBuildBatchSize !== 0 &&
     (!Number.isInteger(siteConfig.ssrBuildBatchSize) ||
       siteConfig.ssrBuildBatchSize < 1)
   ) {
@@ -349,16 +157,6 @@ export async function build(
     )
   }
 
-  if (
-    hasAfterConfigResolve &&
-    !invokedFromCli &&
-    siteConfig.ssrBuildBatchSize
-  ) {
-    throw new Error(
-      'onAfterConfigResolve is not compatible with ssrBuildBatchSize because functions cannot be transferred to SSR batch worker processes.'
-    )
-  }
-
   if (siteConfig.ssrBuildBatchSize) {
     const invalidBuildOption = findNonJsonValue(buildOptions)
     if (invalidBuildOption) {
@@ -366,22 +164,6 @@ export async function build(
         `${invalidBuildOption} is not JSON-serializable and cannot be transferred to SSR batch worker processes.`
       )
     }
-
-    const batchCount = Math.ceil(
-      (siteConfig.pages.length + 1) / siteConfig.ssrBuildBatchSize
-    )
-    if (batchCount > 50) {
-      siteConfig.logger.warn(
-        `ssrBuildBatchSize is ${siteConfig.ssrBuildBatchSize}, which will spawn ${batchCount} worker processes for this build. ` +
-          `Each worker pays a fixed startup cost (roughly 100-200MB of memory and a couple of seconds) regardless of batch size, ` +
-          `so a lot of small batches trades build time for little or no extra memory savings. Consider a larger ssrBuildBatchSize ` +
-          `(aiming for roughly 10-30 batches total) unless you've confirmed smaller batches are needed to stay under your memory budget.`
-      )
-    }
-    siteConfig.logger.info(
-      `ssrBuildBatchSize is set: this limits memory for the server/SSR bundling + rendering step only. ` +
-        `The client bundle is still built once, in a single process, covering every page.`
-    )
   }
 
   const unlinkVue = linkVue()
@@ -421,39 +203,45 @@ export async function build(
 
       const renderQueue = ['404.md', ...siteConfig.pages]
       const sourcePages = new Set(siteConfig.pages)
+      const batchCount = Math.ceil(
+        renderQueue.length / siteConfig.ssrBuildBatchSize!
+      )
 
-      await task('building server bundles + rendering pages', async () => {
-        for (
-          let offset = 0;
-          offset < renderQueue.length;
-          offset += siteConfig.ssrBuildBatchSize!
-        ) {
-          const pages = renderQueue.slice(
-            offset,
-            offset + siteConfig.ssrBuildBatchSize!
-          )
-          const serverPages = [
-            ...new Set(pages.filter((page) => sourcePages.has(page)))
-          ]
+      await task(
+        `building server bundles + rendering pages across ${batchCount} workers`,
+        async () => {
+          for (
+            let offset = 0;
+            offset < renderQueue.length;
+            offset += siteConfig.ssrBuildBatchSize!
+          ) {
+            const pages = renderQueue.slice(
+              offset,
+              offset + siteConfig.ssrBuildBatchSize!
+            )
+            const serverPages = [
+              ...new Set(pages.filter((page) => sourcePages.has(page)))
+            ]
 
-          const { icons } = await dispatchWorker({
-            type: 'ssr-batch',
-            root: siteConfig.root,
-            base: siteConfig.site.base,
-            outDir: siteConfig.outDir,
-            offset,
-            pages,
-            serverPages,
-            contractPath,
-            buildOptions,
-            precomputedPages
-          })
+            const { icons } = await dispatchWorker({
+              type: 'ssr-batch',
+              root: siteConfig.root,
+              base: siteConfig.site.base,
+              outDir: siteConfig.outDir,
+              offset,
+              pages,
+              serverPages,
+              contractPath,
+              buildOptions,
+              precomputedPages
+            })
 
-          for (const icon of icons ?? []) {
-            usedIcons.add(icon)
+            for (const icon of icons ?? []) {
+              usedIcons.add(icon)
+            }
           }
         }
-      })
+      )
     } else {
       let {
         clientResult,
@@ -467,24 +255,20 @@ export async function build(
         return
       }
 
-      const renderMetadata = createRenderMetadata(
-        siteConfig,
-        clientResult,
-        serverResult
-      )
+      const { renderMetadata, additionalHeadTags, metadataScript } =
+        prepareRenderInputs(
+          siteConfig,
+          clientResult,
+          serverResult,
+          pageToHashMap
+        )
 
       clientResult = null
-      // @ts-ignore
+      // @ts-expect-error
       serverResult = null
 
-      const additionalHeadTags = createAdditionalHeadTags(renderMetadata)
-      const metadataScript = generateMetadataScript(pageToHashMap, siteConfig)
-
       disposeBuildCaches()
-      globalThis.gc?.()
-
-      const entryPath = path.join(siteConfig.tempDir, 'app.js')
-      const { render } = await nativeImport(entryPath)
+      const render = await getRenderer(siteConfig.tempDir)
 
       await task('rendering pages', async () => {
         await renderPages(
@@ -537,65 +321,4 @@ export async function build(
   siteConfig.logger.info(
     `build complete in ${((Date.now() - start) / 1000).toFixed(2)}s.`
   )
-}
-
-export function linkVue() {
-  const root = packageDirectorySync()
-  if (root) {
-    const dest = path.resolve(root, 'node_modules/vue')
-    // if user did not install vue by themselves, link VitePress' version
-    if (!fs.existsSync(dest)) {
-      const src = path.dirname(createRequire(import.meta.url).resolve('vue'))
-      fs.mkdirSync(path.dirname(dest), { recursive: true })
-      fs.symlinkSync(src, dest, 'junction')
-      return () => {
-        fs.unlinkSync(dest)
-      }
-    }
-  }
-  return () => {}
-}
-
-function generateMetadataScript(
-  pageToHashMap: Record<string, string>,
-  config: SiteConfig
-) {
-  if (config.mpa) {
-    return { html: '', inHead: false }
-  }
-
-  // We embed the hash map and site config strings into each page directly
-  // so that it doesn't alter the main chunk's hash on every build.
-  // It's also embedded as a string and JSON.parsed from the client because
-  // it's faster than embedding as JS object literal.
-  const hashMapString = JSON.stringify(JSON.stringify(pageToHashMap))
-  const siteDataString = JSON.stringify(
-    JSON.stringify(serializeFunctions({ ...config.site, head: [] }))
-  )
-
-  const metadataContent = `window.__VP_HASH_MAP__=JSON.parse(${hashMapString});${
-    siteDataString.includes('_vp-fn_')
-      ? `${deserializeFunctions};window.__VP_SITE_DATA__=deserializeFunctions(JSON.parse(${siteDataString}));`
-      : `window.__VP_SITE_DATA__=JSON.parse(${siteDataString});`
-  }`
-
-  const metadataFile = path.join(
-    config.assetsDir,
-    'chunks',
-    `metadata.${createHash('sha256')
-      .update(metadataContent)
-      .digest('hex')
-      .slice(0, 8)}.js`
-  )
-
-  const resolvedMetadataFile = path.join(config.outDir, metadataFile)
-  const metadataFileURL = slash(`${config.site.base}${metadataFile}`)
-
-  fs.mkdirSync(path.dirname(resolvedMetadataFile), { recursive: true })
-  fs.writeFileSync(resolvedMetadataFile, metadataContent)
-
-  return {
-    html: `<script type="module" src="${metadataFileURL}"></script>`,
-    inHead: true
-  }
 }

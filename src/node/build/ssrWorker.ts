@@ -1,4 +1,5 @@
-import { linkVue, runClientBuild, runSsrBatch } from './build'
+import { linkVue } from '../utils/linkVue'
+import { runClientBuild, runSsrBatch } from './worker'
 
 process.on('message', async (message: any) => {
   const unlinkVue = linkVue()

@@ -223,28 +223,16 @@ export interface UserConfig<
    */
   buildConcurrency?: number
   /**
-   * Limits the number of page entries in each server bundle, so that the
-   * server-side bundling + rendering work runs across multiple worker
-   * processes with roughly bounded peak memory per process, rather than
-   * building and rendering the whole site's server bundle in one process.
-   * Useful for very large sites where a single monolithic server bundle
-   * would otherwise exhaust available memory during the build.
+   * Splits server-side bundling + rendering across multiple worker
+   * processes, each handling at most this many pages, to bound peak
+   * memory on large sites. Does not affect the client bundle.
    *
-   * The client bundle still contains every page and is built once, in its
-   * own separate process, regardless of this setting — it only affects the
-   * server/SSR side of the build, and is NOT itself chunked by this option.
-   *
-   * Each batch runs in its own worker process, which has a fixed startup
-   * cost (roughly 100-200MB of memory and a couple of seconds) independent
-   * of batch size. A batch size that's small relative to your total page
-   * count pays that fixed cost many times over for little or no extra
-   * memory savings; a batch size that's too large reduces the number of
-   * batches (and the benefit of batching) without necessarily improving
-   * build time. As a starting point, aim for a batch size that results in
-   * roughly 10-30 batches for your site, then adjust based on observed
-   * memory usage.
-   *
+   * Each worker process loads and evaluates your config file
+   * independently, so it must be safe to import more than once per
+   * build — avoid non-idempotent side effects (network calls, database
+   * reads, writes) in it, or memoize them yourself.
    * @experimental
+   * TODO: link a docs page covering batch-size tradeoffs once one exists
    */
   ssrBuildBatchSize?: number
   /**
